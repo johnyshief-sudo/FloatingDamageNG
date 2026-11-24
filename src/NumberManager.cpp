@@ -40,6 +40,56 @@ namespace FDNG
 	void NumberManager::Enqueue(const DamageEvent& a_event)
 	{
 		std::scoped_lock lk{ _queueLock };
+		if (a_event.origin == OriginTier::kPlayerVictim &&
+			a_event.flags.dotTick && a_event.kind <= DamageKind::kMagic &&
+			a_event.extraIndex == kNoExtra && a_event.customText[0] == '\0') {
+			const float prior = _playerDotSample.amount;
+			const float mitigated = _playerDotSample.mitigated;
+			_playerDotSample = a_event;
+			_playerDotSample.amount += prior;
+			_playerDotSample.mitigated += mitigated;
+			return;
+		}
+		if (a_event.origin != OriginTier::kPlayerVictim && a_event.kind <= DamageKind::kMagic &&
+			a_event.customText[0] == '\0' && !a_event.flags.perfectBlock) {
+			// Separate informational extras are already part of the hit.
+			// They must not add their amount to the real health damage.
+			if (a_event.extraIndex != kNoExtra || a_event.amount <= 0.0f) {
+				return;
+			}
+			OutgoingBucket* free = nullptr;
+			for (auto& bucket : _outgoingBuckets) {
+				if (!bucket.active) {
+					if (!free) {
+						free = &bucket;
+					}
+					continue;
+				}
+				auto& e = bucket.event;
+				if (e.victimID == a_event.victimID && e.origin == a_event.origin &&
+					e.flags.dotTick == a_event.flags.dotTick) {
+					e.amount += a_event.amount;
+					e.mitigated += a_event.mitigated;
+					return;
+				}
+			}
+			if (free) {
+				*free = OutgoingBucket{};
+				free->active = true;
+				auto& e = free->event;
+				e = a_event;
+				// A single neutral damage total, no extra informational tags.
+				e.kind = DamageKind::kPhysical;
+				e.flags = HitFlags{};
+				e.flags.dotTick = a_event.flags.dotTick;
+				e.extras = HitExtras{};
+				e.location[0] = '\0';
+				e.ampMult = 0.0f;
+				e.useColor = true;
+				e.colorRGB = e.flags.dotTick ? 0xFFD54A : 0xFFFFFF;
+				return;
+			}
+		}
 		if (_queueCount < kQueueCapacity) {
 			_queue[_queueCount++] = a_event;
 		}
@@ -159,12 +209,16 @@ namespace FDNG
 				// merge window than damage ticks get.
 				const float mergeWindow = a_event.kind == DamageKind::kHealing ?
 				                              std::max(settings->dotAccumulationWindow, 0.8f) :
+				                              a_event.origin == OriginTier::kPlayerVictim ? 0.12f :
 				                              settings->dotAccumulationWindow;
 				// Crits, DoT ticks, sneak attacks, extras and locational hits stand alone; only plain numbers of
 				// the same origin merge — without the origin check, an NPC
 				// hitting the player's target folded into the player's number.
 				if (!n.custom && a_event.customText[0] == '\0' &&
 					!(a_event.kind == DamageKind::kHealing && a_event.origin == OriginTier::kPlayerVictim) &&
+					// Outgoing health damage has already been combined in
+					// fixed buckets. Never merge two finished buckets.
+					!(a_event.origin != OriginTier::kPlayerVictim && a_event.kind <= DamageKind::kMagic) &&
 					n.kind == a_event.kind && n.origin == a_event.origin &&
 					!n.flags.critical && !a_event.flags.critical &&
 					!n.flags.sneak && !a_event.flags.sneak &&
@@ -175,7 +229,9 @@ namespace FDNG
 					n.age < mergeWindow) {
 					n.amount += a_event.amount;
 					n.mitigated += a_event.mitigated;
-					n.age = 0.0f;  // restart the merge window and the animation
+					if (a_event.origin != OriginTier::kPlayerVictim) {
+						n.age = 0.0f;  // restart the merge window and the animation
+					}
 					BuildText(n);
 					return;
 				}
@@ -213,6 +269,7 @@ namespace FDNG
 		n.colorRGB = a_event.colorRGB;
 		n.scale = a_event.scale;
 		if (a_event.origin == OriginTier::kPlayerVictim && a_event.customText[0] == '\0') {
+			n.lifetime *= 2.0f;
 			n.useColor = true;
 			n.colorRGB = a_event.kind == DamageKind::kHealing ? 0x89F58C : 0xFF4040;
 		}
@@ -247,6 +304,11 @@ namespace FDNG
 				spreadPattern = effect->spread;
 				spawnAngleDeg = effect->spawnAngleDeg;
 			}
+		}
+		if (n.origin != OriginTier::kPlayerVictim && n.kind <= DamageKind::kMagic &&
+			n.flags.dotTick && !n.custom) {
+			n.motion = MotionProfile{ -38.0f, 0.0f, 0.0f, 0.0f };
+			spreadPattern = SpreadPattern::kAlternate;
 		}
 
 		switch (spreadPattern) {
@@ -415,15 +477,33 @@ namespace FDNG
 				}
 			}
 			_queueCount = 0;
-		}
-		_playerHealElapsed += dt;
-		if (_playerHealElapsed >= 1.0f) {
-			_playerHealElapsed -= 1.0f;
-			if (_playerHealSample.amount >= 0.5f) {
-				_playerHealSample.lifetimeSeconds = 0.92f;
-				Spawn(_playerHealSample);
+			for (auto& bucket : _outgoingBuckets) {
+				if (!bucket.active) {
+					continue;
+				}
+				bucket.elapsed += dt;
+				const float interval = bucket.event.flags.dotTick ? 0.50f : 0.22f;
+				if (bucket.elapsed >= interval) {
+					if (bucket.event.amount >= 0.5f) {
+						Spawn(bucket.event);
+					}
+					bucket = OutgoingBucket{};
+				}
 			}
-			_playerHealSample = DamageEvent{};
+			_playerHealElapsed += dt;
+			if (_playerHealElapsed >= 1.0f) {
+				_playerHealElapsed -= 1.0f;
+				if (_playerHealSample.amount >= 0.5f) {
+					_playerHealSample.lifetimeSeconds = 0.92f;
+					Spawn(_playerHealSample);
+				}
+				if (_playerDotSample.amount >= 0.5f) {
+					_playerDotSample.lifetimeSeconds = 0.92f;
+					Spawn(_playerDotSample);
+				}
+				_playerHealSample = DamageEvent{};
+				_playerDotSample = DamageEvent{};
+			}
 		}
 
 		const auto settings = Settings::GetSingleton();

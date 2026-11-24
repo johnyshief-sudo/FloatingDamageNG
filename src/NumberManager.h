@@ -91,6 +91,17 @@ namespace FDNG
 		std::chrono::steady_clock::time_point _lastPreview{};
 		// RFAB: one independent useful-health recovery total per second.
 		DamageEvent _playerHealSample{};
+		DamageEvent _playerDotSample{};
 		float _playerHealElapsed{ 0.0f };
+
+		// One fixed aggregation window per victim, origin and damage
+		// category. Only visual totals, never written back into gameplay.
+		struct OutgoingBucket
+		{
+			DamageEvent event{};
+			float elapsed{ 0.0f };
+			bool active{ false };
+		};
+		std::array<OutgoingBucket, kPoolCapacity * 2> _outgoingBuckets{};
 	};
 }

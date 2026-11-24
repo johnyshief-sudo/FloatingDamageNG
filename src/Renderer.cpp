@@ -229,6 +229,29 @@ namespace FDNG::Renderer
 			return { 1.0f - 0.30f * k, 1.0f + 0.55f * k };  // squash x, stretch y
 		}
 
+		// RFAB: remove source underlining; retain a plain black legibility outline.
+		OriginStyle EffectiveOriginStyle(OriginStyle a_style)
+		{
+			return a_style == OriginStyle::kUnderline ? OriginStyle::kNone : a_style;
+		}
+
+		ImVec2 MeasureNumberBlock(const Number& a_n, float a_fontPx)
+		{
+			auto* font = Fonts::ForKind(a_n.kind);
+			auto size = font->CalcTextSizeA(a_fontPx, FLT_MAX, 0.0f, a_n.text);
+			if (a_n.subtext[0] != '\0') {
+				const float subPx = a_fontPx * SubtextRatio(a_n.amount, a_n.mitigated);
+				const auto sub = font->CalcTextSizeA(subPx, FLT_MAX, 0.0f, a_n.subtext);
+				size.x = std::max(size.x, sub.x);
+				size.y += sub.y;
+			}
+			const auto settings = Settings::GetSingleton();
+			const auto metrics = ComputeStyleMetrics(EffectiveOriginStyle(settings->originStyle), settings->styleThickness);
+			const auto st = StretchScale(a_n);
+			return { (size.x + 2.0f * metrics.padX) * std::max(st.x, 1.0f),
+			         (size.y + metrics.padTop + metrics.padBottom) * std::max(st.y, 1.0f) };
+		}
+
 		// Draw one number (text + optional mitigation subtext). Returns the
 		// block extent drawn (including origin marker + any stretch headroom).
 		ImVec2 DrawNumberBlock(ImDrawList* a_drawList, const ResolvedNumber& a_rn, ImVec2 a_topLeft, float a_fontPx)
@@ -252,14 +275,15 @@ namespace FDNG::Renderer
 			const ImU32 color = KindColor(n, a_rn.alpha);
 			const ImU32 origin = OriginColor(n.origin, alpha);
 			const float thickness = settings->styleThickness;
+			const auto originStyle = EffectiveOriginStyle(settings->originStyle);
 
 			// kOutline colors the glyph ring with the origin; kNone keeps the
 			// same full-thickness ring but black (readable, no source shown);
 			// underline/box use a thin black ring plus a separate marker shape.
-			const bool ringStyle = settings->originStyle == OriginStyle::kOutline || settings->originStyle == OriginStyle::kNone;
-			const ImU32 textOutline = settings->originStyle == OriginStyle::kOutline ? origin : IM_COL32(0, 0, 0, alpha);
+			const bool ringStyle = originStyle == OriginStyle::kOutline || originStyle == OriginStyle::kNone;
+			const ImU32 textOutline = originStyle == OriginStyle::kOutline ? origin : IM_COL32(0, 0, 0, alpha);
 			const float textThickness = ringStyle ? thickness : 1.0f;
-			const auto metrics = ComputeStyleMetrics(settings->originStyle, thickness);
+			const auto metrics = ComputeStyleMetrics(originStyle, thickness);
 
 			// Base block, then reserve stretch headroom so the VR quad (which
 			// samples this exact rect) never clips the enlarged pixels. The
@@ -283,7 +307,7 @@ namespace FDNG::Renderer
 					ImVec2(content.x + (blockSz.x - subSz.x) * 0.5f, content.y + mainSz.y), subColor, textOutline, textThickness, n.subtext);
 			}
 
-			switch (settings->originStyle) {
+			switch (originStyle) {
 			case OriginStyle::kUnderline:
 				a_drawList->AddRectFilled(
 					ImVec2(content.x, content.y + blockSz.y + kUnderlineGap),
@@ -514,6 +538,21 @@ namespace FDNG::Renderer
 			const auto settings = Settings::GetSingleton();
 			const bool firstPerson = PlayerInFirstPerson();
 
+			// Reserve the HUD positions for the player's newest numbers first.
+			// Then place older/other numbers above occupied rectangles, including
+			// the font's outline and optional subtext, without hiding totals.
+			std::sort(g_resolved.begin(), g_resolved.end(), [](const ResolvedNumber& a, const ResolvedNumber& b) {
+				const bool ap = a.number->origin == OriginTier::kPlayerVictim;
+				const bool bp = b.number->origin == OriginTier::kPlayerVictim;
+				if (ap != bp) {
+					return ap;
+				}
+				return a.number->age < b.number->age;
+			});
+			struct OccupiedRect { float left, top, right, bottom; };
+			std::array<OccupiedRect, NumberManager::kPoolCapacity> occupied{};
+			std::size_t occupiedCount = 0;
+			constexpr float gap = 4.0f;
 			for (const auto& rn : g_resolved) {
 				ImVec2 screenPos;
 				float fontPx;
@@ -543,9 +582,34 @@ namespace FDNG::Renderer
 					fontPx = BaseFontPx() * rn.scale * perspective;
 				}
 
-				// Center using the same font the drawer picks per kind.
-				const ImVec2 sz = Fonts::ForKind(rn.number->kind)->CalcTextSizeA(fontPx, FLT_MAX, 0.0f, rn.number->text);
-				DrawNumberBlock(drawList, rn, ImVec2(screenPos.x - sz.x * 0.5f, screenPos.y - sz.y), fontPx);
+				const auto sz = MeasureNumberBlock(*rn.number, fontPx);
+				const float left = screenPos.x - sz.x * 0.5f;
+				const float right = left + sz.x;
+				const bool fallingDot = rn.number->origin != OriginTier::kPlayerVictim &&
+				                        rn.number->flags.dotTick && rn.number->kind <= DamageKind::kMagic;
+				float top = screenPos.y - sz.y + (fallingDot ? sz.y + gap : 0.0f);
+				// Every collision moves the new rectangle strictly in its
+				// own direction: upward for hits, downward for enemy DoTs.
+				// Rescan because that move can encounter another older number.
+				for (std::size_t pass = 0; pass < occupiedCount; ++pass) {
+					bool moved = false;
+					for (std::size_t i = 0; i < occupiedCount; ++i) {
+						const auto& r = occupied[i];
+						if (left < r.right + gap && right + gap > r.left &&
+							top < r.bottom + gap && top + sz.y + gap > r.top) {
+							top = fallingDot ? r.bottom + gap + 0.25f : r.top - gap - sz.y - 0.25f;
+							moved = true;
+						}
+					}
+					if (!moved) {
+						break;
+					}
+				}
+				if (top < 0.0f || top >= displaySize.y || right <= 0.0f || left >= displaySize.x) {
+					continue;
+				}
+				DrawNumberBlock(drawList, rn, ImVec2(left, top), fontPx);
+				occupied[occupiedCount++] = { left, top, right, top + sz.y };
 			}
 
 			ImGui::End();

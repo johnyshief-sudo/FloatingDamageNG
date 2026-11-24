@@ -549,7 +549,10 @@ namespace FDNG
 			return;
 		}
 
-		if (amount < Settings::GetSingleton()->minDamageToShow) {
+		// Keep sub-threshold components of outgoing hits: the HUD applies
+		// the visibility threshold to the combined hit, not to its parts.
+		if (amount <= 0.0f ||
+			(a_victim->IsPlayerRef() && amount < Settings::GetSingleton()->minDamageToShow)) {
 			return;
 		}
 
@@ -604,7 +607,10 @@ namespace FDNG
 		FindRecentMagic(a_raw.victimID, kind, attacker, &mgefID);
 
 		AuditRecord(a_raw.victimID, a_raw.amount);
-		EmitPooledDamage(a_victim, attacker, -a_raw.amount, kind, 0.0f, mgefID);
+		// Unattributed AV damage includes RFAB's script-driven periodic
+		// effects. For the player's HUD, put this fallback in the same
+		// fixed bucket; exact weapon and magic hits retain their own path.
+		EmitPooledDamage(a_victim, attacker, -a_raw.amount, kind, 0.0f, mgefID, a_victim->IsPlayerRef());
 	}
 
 	void Capture::ProcessEffect(const RawEvent& a_raw, RE::Actor* a_victim)
@@ -738,9 +744,15 @@ namespace FDNG
 		// Concentration spells tick in sub-point deltas; pool them per
 		// victim+type until they clear the display threshold.
 		const bool perTick = a_overTime && settings->dotDisplay == DotDisplay::kPerTick;
+		// RFAB: the player's timed health damage is sampled in fixed one-second
+		// HUD buckets. Preserve the original tick amounts, including sub-point
+		// deltas, instead of pooling them across bucket boundaries here.
+		const bool healthDamage = a_kind <= DamageKind::kMagic;
+		const bool playerHealthDot = a_overTime && a_victim->IsPlayerRef() && healthDamage;
+		const bool groupedOutgoing = !a_victim->IsPlayerRef() && healthDamage;
 		float emit = a_amount;
 		float emitMitigated = a_mitigated;
-		if (perTick || a_amount < settings->minDamageToShow) {
+		if (!playerHealthDot && !groupedOutgoing && (perTick || a_amount < settings->minDamageToShow)) {
 			std::scoped_lock lk{ _lock };
 			auto& pool = _tickAccums[PoolKey(a_victim->GetFormID(), a_kind)];
 			const auto now = Clock::now();
@@ -754,7 +766,7 @@ namespace FDNG
 		}
 
 		HitFlags flags;
-		flags.dotTick = perTick;
+		flags.dotTick = perTick || playerHealthDot || (groupedOutgoing && a_overTime);
 		EmitDamage(a_victim, a_attacker, emit, a_kind, flags, emitMitigated, 0.0f, nullptr, MitigationLabel::kResisted, a_sourceID);
 	}
 
