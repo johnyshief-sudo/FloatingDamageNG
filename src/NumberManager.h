@@ -89,5 +89,8 @@ namespace FDNG
 
 		std::chrono::steady_clock::time_point _lastUpdate{};
 		std::chrono::steady_clock::time_point _lastPreview{};
+		// RFAB: one independent useful-health recovery total per second.
+		DamageEvent _playerHealSample{};
+		float _playerHealElapsed{ 0.0f };
 	};
 }

@@ -164,6 +164,7 @@ namespace FDNG
 				// the same origin merge — without the origin check, an NPC
 				// hitting the player's target folded into the player's number.
 				if (!n.custom && a_event.customText[0] == '\0' &&
+					!(a_event.kind == DamageKind::kHealing && a_event.origin == OriginTier::kPlayerVictim) &&
 					n.kind == a_event.kind && n.origin == a_event.origin &&
 					!n.flags.critical && !a_event.flags.critical &&
 					!n.flags.sneak && !a_event.flags.sneak &&
@@ -211,6 +212,10 @@ namespace FDNG
 		n.useColor = a_event.useColor;
 		n.colorRGB = a_event.colorRGB;
 		n.scale = a_event.scale;
+		if (a_event.origin == OriginTier::kPlayerVictim && a_event.customText[0] == '\0') {
+			n.useColor = true;
+			n.colorRGB = a_event.kind == DamageKind::kHealing ? 0x89F58C : 0xFF4040;
+		}
 		if (a_event.customText[0] != '\0') {
 			n.custom = true;
 			std::memcpy(n.text, a_event.customText, sizeof(n.text));
@@ -400,9 +405,25 @@ namespace FDNG
 		{
 			std::scoped_lock lk{ _queueLock };
 			for (std::size_t i = 0; i < _queueCount; ++i) {
-				Spawn(_queue[i]);
+				const auto& e = _queue[i];
+				if (e.kind == DamageKind::kHealing && e.origin == OriginTier::kPlayerVictim && e.customText[0] == '\0') {
+					const float prior = _playerHealSample.amount;
+					_playerHealSample = e;
+					_playerHealSample.amount += prior;
+				} else {
+					Spawn(e);
+				}
 			}
 			_queueCount = 0;
+		}
+		_playerHealElapsed += dt;
+		if (_playerHealElapsed >= 1.0f) {
+			_playerHealElapsed -= 1.0f;
+			if (_playerHealSample.amount >= 0.5f) {
+				_playerHealSample.lifetimeSeconds = 0.92f;
+				Spawn(_playerHealSample);
+			}
+			_playerHealSample = DamageEvent{};
 		}
 
 		const auto settings = Settings::GetSingleton();

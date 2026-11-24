@@ -517,16 +517,17 @@ namespace FDNG::Renderer
 			for (const auto& rn : g_resolved) {
 				ImVec2 screenPos;
 				float fontPx;
-				if (firstPerson && rn.number->origin == OriginTier::kPlayerVictim) {
-					// First person: player numbers pin to a configurable screen
-					// spot (they'd otherwise sit on the camera), keeping the
-					// vertical component of their motion.
-					if (!settings->showFirstPersonNumbers) {
+				if (rn.number->origin == OriginTier::kPlayerVictim) {
+					// RFAB: always pin the player's own numbers to its HUD,
+					// independent of camera mode. Health recovery on the left,
+					// incoming damage on the right. Keep a short upward motion.
+					if (firstPerson && !settings->showFirstPersonNumbers) {
 						continue;
 					}
-					const float risePx = (rn.worldPos.z - rn.number->anchor.z) * 0.75f;
-					screenPos = ImVec2(displaySize.x * settings->firstPersonX,
-						displaySize.y * settings->firstPersonY - risePx);
+					const bool heal = rn.number->kind == DamageKind::kHealing;
+					const float risePx = rn.number->age * displaySize.y * 0.025f;
+					screenPos = ImVec2(displaySize.x * (heal ? 0.415f : 0.585f),
+						displaySize.y * 0.89f - risePx);
 					fontPx = BaseFontPx() * rn.scale;
 				} else {
 					if (!rn.projected) {
