@@ -392,6 +392,9 @@ namespace FDNG
 			raw.mgefID = mgef->GetFormID();
 		}
 		raw.overTime = a_effect->duration > 0.0f;
+		if (a_effect->effect) {
+			raw.definedDuration = a_effect->effect->effectItem.duration;
+		}
 		QueueRaw(raw);
 	}
 
@@ -645,7 +648,34 @@ namespace FDNG
 				}
 			}
 			AuditRecord(a_raw.victimID, a_raw.amount);
-			EmitPooledDamage(a_victim, caster, -a_raw.amount, kind, mitigated, a_raw.mgefID, a_raw.overTime);
+			bool overTime = a_raw.overTime;
+			// RFAB uses one MGEF for both the instant and five-second
+			// spirit hit. The ActiveEffect duration may be nonzero even
+			// for an instant application; the original EFIT distinguishes
+			// these entries without guessing from the magnitude.
+			const auto localID = a_raw.mgefID & 0x00FFFFFFu;
+			switch (localID) {
+			case 0x005C56u:  // poison
+			case 0x0CDAF4u:  // shock
+			case 0x0CDAF5u:  // frost
+			case 0x0CDAF6u:  // fire
+			case 0x0CDAF7u:  // light
+			case 0xAD4F15u:  // disease
+				if (a_raw.definedDuration != 0xFFFFFFFFu) {
+					const auto data = RE::TESDataHandler::GetSingleton();
+					if (data && data->LookupFormID(localID, "RFAB.esp") == a_raw.mgefID) {
+						overTime = a_raw.definedDuration != 0u;
+						if (settings->debugLog) {
+							logger::debug("RFAB spirit {:08X}: EFIT={} liveTimed={} popupTimed={} amount={:.2f}",
+								a_raw.mgefID, a_raw.definedDuration, a_raw.overTime, overTime, -a_raw.amount);
+						}
+					}
+				}
+				break;
+			default:
+				break;
+			}
+			EmitPooledDamage(a_victim, caster, -a_raw.amount, kind, mitigated, a_raw.mgefID, overTime);
 			return;
 		}
 

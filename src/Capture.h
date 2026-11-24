@@ -190,6 +190,8 @@ namespace FDNG
 			float amount{ 0.0f };  // signed engine delta (negative = damage)
 			bool victimDead{ false };
 			bool overTime{ false };
+			// Original EFIT duration; UINT32_MAX means no effect record was available.
+			std::uint32_t definedDuration{ 0xFFFFFFFFu };
 		};
 
 		struct PendingHit
